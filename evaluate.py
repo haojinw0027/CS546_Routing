@@ -11,13 +11,14 @@ import os
 
 def extract_final_answer(response_text):
     """
-    Extract the number after **Final Answer:** until \n
-    
+    Extract the answer after **Final Answer:** until \n
+    Supports both numbers and letter choices (A, B, C, D)
+
     Args:
         response_text (str): The response text containing the final answer
-        
+
     Returns:
-        str: The extracted answer number, or None if not found
+        str: The extracted answer (number or letter), or None if not found
     """
     # First try to match **Final Answer:** followed by any text until newline
     pattern1 = r'\*\*Final Answer:\*\*\s*([^\n\r]*)'
@@ -25,12 +26,19 @@ def extract_final_answer(response_text):
     
     if match1:
         answer_text = match1.group(1).strip()
-        
-        # Extract numbers from the answer text
+
+        # First try to extract letter choices (A, B, C, D) - case insensitive
+        letter_pattern = r'\b[ABCD]\b'
+        letter_match = re.search(letter_pattern, answer_text, re.IGNORECASE)
+
+        if letter_match:
+            return letter_match.group(0).upper()
+
+        # If no letter found, extract numbers from the answer text
         # This handles cases like "16", "16.", "$16$", etc.
         number_pattern = r'[-+]?\d+\.?\d*'
         number_match = re.search(number_pattern, answer_text)
-        
+
         if number_match:
             return number_match.group(0)
     
@@ -40,19 +48,30 @@ def extract_final_answer(response_text):
     
     if match2:
         answer_text = match2.group(1).strip()
-        
-        # Extract numbers from the answer text
+
+        # First try to extract letter choices (A, B, C, D) - case insensitive
+        letter_pattern = r'\b[ABCD]\b'
+        letter_match = re.search(letter_pattern, answer_text, re.IGNORECASE)
+
+        if letter_match:
+            return letter_match.group(0).upper()
+
+        # If no letter found, extract numbers from the answer text
         number_pattern = r'[-+]?\d+\.?\d*'
         number_match = re.search(number_pattern, answer_text)
-        
+
         if number_match:
             return number_match.group(0)
     
-    # Try to find the last occurrence of a standalone number at the end of the response
+    # Try to find the last occurrence of a standalone answer at the end of the response
     # This might catch cases where the response was truncated but the final answer is still there
     lines = response_text.strip().split('\n')
     for line in reversed(lines):
         line = line.strip()
+        # Check for standalone letter choices first
+        if line and re.match(r'^[ABCD]$', line, re.IGNORECASE):
+            return line.upper()
+        # Check for standalone numbers
         if line and re.match(r'^\d+$', line):
             return line
     
