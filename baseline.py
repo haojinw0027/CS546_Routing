@@ -84,7 +84,8 @@ def prompt_model(model: str,
         "model": model,
         "prompt": full_prompt,
         "temperature": temperature,
-        "max_tokens": max_tokens
+        "max_tokens": max_tokens,
+        'stop': ['<|endoftext|>', '\nAnswer']
     }
     try:
         response = requests.post(chat_url,
@@ -149,8 +150,7 @@ def format_arc_question(question: str, choices: List[str], labels: List[str]) ->
     formatted = f"Question: {question}\n"
     for label, choice in zip(labels, choices):
         formatted += f"{label}. {choice}\n"
-    formatted += "Answer:"
-    return formatted
+    return formatted[:-1]
 
 
 def load_arc_challenge_dataset(split: str = "test") -> Optional[BenchmarkConfig]:
@@ -391,12 +391,12 @@ def save_results(results: Dict[str, Any], output_path: str):
         print(f"Error saving results: {e}")
 
 
-def get_auto_output_path(prompt_type: str, model_name: str, benchmark_name: str = None) -> str:
+def get_auto_output_path(prompt_type: str, model_name: str, benchmark_name: str = None, max_tokens: int = 1000) -> str:
     """Generate automatic output path based on prompt type, model, and benchmark"""
     model_short = get_model_short_name(model_name)
     filename = f"{prompt_type}.json"
     bench_safe = benchmark_name.replace(' ', '_').lower()
-    return os.path.join(f"./results/{bench_safe}/{model_short}", filename)
+    return os.path.join(f"./results/{bench_safe}/{model_short}/{max_tokens}", filename)
 
 
 def main():
@@ -450,7 +450,7 @@ def main():
     if args.output:
         output_path = args.output
     else:
-        output_path = get_auto_output_path(args.system_prompt_type, args.model, benchmark.name)
+        output_path = get_auto_output_path(args.system_prompt_type, args.model, benchmark.name, args.max_tokens)
 
     # Run benchmark
     results = run_benchmark(args.model, benchmark, args.host, args.port, args.verbose, system_prompt, args.max_sample, output_path)
