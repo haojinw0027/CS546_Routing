@@ -13,6 +13,7 @@ import os
 import re
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
+from tqdm import tqdm
 
 try:
     from datasets import load_dataset
@@ -33,77 +34,76 @@ class BenchmarkConfig:
     max_tokens: int = 1000
 
 
-class VLLMClient:
-    """Client for interacting with vLLM OpenAI-compatible API"""
+def get_available_models(host: str = "localhost", port: int = 8000) -> List[str]:
+    """Get list of available models from the server"""
+    models_url = f"http://{host}:{port}/v1/models"
+    try:
+        response = requests.get(models_url, timeout=10)
+        response.raise_for_status()
+        models_data = response.json()
+        return [model["id"] for model in models_data.get("data", [])]
+    except requests.RequestException as e:
+        print(f"Error getting models from server: {e}")
+        return []
 
-    def __init__(self, host: str = "localhost", port: int = 8000):
-        self.models_url = f"http://{host}:{port}/v1/models"
-        self.chat_url = f"http://{host}:{port}/v1/completions"
 
-    def get_available_models(self) -> List[str]:
-        """Get list of available models from the server"""
-        try:
-            response = requests.get(self.models_url, timeout=10)
-            response.raise_for_status()
-            models_data = response.json()
-            return [model["id"] for model in models_data.get("data", [])]
-        except requests.RequestException as e:
-            print(f"Error getting models from server: {e}")
-            return []
+def verify_model(expected_model: str, host: str = "localhost", port: int = 8000) -> bool:
+    """Verify that the expected model is available on the server"""
+    available_models = get_available_models(host, port)
+    if not available_models:
+        print("Warning: Could not retrieve model list from server")
+        return False
 
-    def verify_model(self, expected_model: str) -> bool:
-        """Verify that the expected model is available on the server"""
-        available_models = self.get_available_models()
-        if not available_models:
-            print("Warning: Could not retrieve model list from server")
-            return False
+    if expected_model in available_models:
+        print(f"✓ Model '{expected_model}' verified on server")
+        return True
+    else:
+        print(f"✗ Model '{expected_model}' not found on server")
+        print(f"Available models: {', '.join(available_models)}")
+        return False
 
-        if expected_model in available_models:
-            print(f"✓ Model '{expected_model}' verified on server")
-            return True
-        else:
-            print(f"✗ Model '{expected_model}' not found on server")
-            print(f"Available models: {', '.join(available_models)}")
-            return False
 
-    def prompt_model(self,
-                    model: str,
-                    prompt: str,
-                    system_prompt: Optional[str] = None,
-                    temperature: float = 0.0,
-                    max_tokens: int = 1000) -> Optional[str]:
-        """Send a prompt to the model and return the response"""
-        # Combine system prompt and user prompt for completions API
-        full_prompt = ""
-        if system_prompt:
-            full_prompt = f"{system_prompt}\n\nQuestion: {prompt}\n\nAnswer:"
-        else:
-            full_prompt = prompt
+def prompt_model(model: str,
+                prompt: str,
+                system_prompt: Optional[str] = None,
+                temperature: float = 0.0,
+                max_tokens: int = 1000,
+                host: str = "localhost",
+                port: int = 8000) -> Optional[str]:
+    """Send a prompt to the model and return the response"""
+    chat_url = f"http://{host}:{port}/v1/completions"
 
-        payload = {
-            "model": model,
-            "prompt": full_prompt,
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
-        try:
-            response = requests.post(self.chat_url,
-                                   json=payload,
-                                   timeout=60)
-            response.raise_for_status()
-            result = response.json()
-            generated_text = result["choices"][0]["text"].strip()
-            return generated_text
-        except requests.RequestException as e:
-            print(f"Error sending request: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                print(f"Response status code: {e.response.status_code}")
-                print(f"Response text: {e.response.text}")
-            return None
-        except (KeyError, IndexError) as e:
-            print(f"Error parsing response: {e}")
-            print(f"Response content: {result}")
-            return None
+    # Combine system prompt and user prompt for completions API
+    full_prompt = ""
+    if system_prompt:
+        full_prompt = f"{system_prompt}\n\nQuestion: {prompt}\n\nAnswer:"
+    else:
+        full_prompt = prompt
+
+    payload = {
+        "model": model,
+        "prompt": full_prompt,
+        "temperature": temperature,
+        "max_tokens": max_tokens
+    }
+    try:
+        response = requests.post(chat_url,
+                               json=payload,
+                               timeout=60)
+        response.raise_for_status()
+        result = response.json()
+        generated_text = result["choices"][0]["text"].strip()
+        return generated_text
+    except requests.RequestException as e:
+        print(f"Error sending request: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response status code: {e.response.status_code}")
+            print(f"Response text: {e.response.text}")
+        return None
+    except (KeyError, IndexError) as e:
+        print(f"Error parsing response: {e}")
+        print(f"Response content: {result}")
+        return None
 
 
 def load_system_prompt_from_yaml(yaml_path: str, prompt_type: str = "default") -> Optional[str]:
@@ -142,100 +142,6 @@ def load_system_prompt_from_yaml(yaml_path: str, prompt_type: str = "default") -
     except Exception as e:
         print(f"Error loading system prompt: {e}")
         return None
-
-
-def normalize_aime_answer(answer: str) -> str:
-    """Normalize AIME answer to 3-digit format"""
-    # Extract first number from the answer string
-    numbers = re.findall(r'\d+', str(answer))
-    if numbers:
-        return f"{int(numbers[0]):03d}"
-    return "000"
-
-
-def extract_answer_choice(response: str) -> str:
-    """Extract answer choice (A, B, C, D) from model response"""
-    # Look for patterns like "A)", "A.", "A:", or standalone "A"
-    patterns = [
-        r'\b([A-E])\)',  # A)
-        r'\b([A-E])\.',  # A.
-        r'\b([A-E]):',   # A:
-        r'\b([A-E])\b',  # standalone A
-        r'answer.*?([A-E])',  # "answer is A"
-        r'([A-E]).*?correct',  # "A is correct"
-    ]
-
-    for pattern in patterns:
-        matches = re.findall(pattern, response, re.IGNORECASE)
-        if matches:
-            return matches[0].upper()
-
-    return ""
-
-
-def evaluate_arc_predictions(predictions: List[str], ground_truth: List[str]) -> Dict[str, Any]:
-    """Evaluate ARC multiple choice predictions"""
-    correct = 0
-    total = len(predictions)
-    detailed_results = []
-
-    for i, (pred, truth) in enumerate(zip(predictions, ground_truth)):
-        extracted_answer = extract_answer_choice(pred)
-        is_correct = extracted_answer == truth.upper()
-
-        if is_correct:
-            correct += 1
-
-        detailed_results.append({
-            "question_id": i + 1,
-            "prediction": pred,
-            "extracted_answer": extracted_answer,
-            "ground_truth": truth,
-            "correct": is_correct
-        })
-
-    accuracy = correct / total if total > 0 else 0
-
-    return {
-        "accuracy": accuracy,
-        "correct": correct,
-        "total": total,
-        "detailed_results": detailed_results
-    }
-
-
-def evaluate_aime_predictions(predictions: List[str], ground_truth: List[str]) -> Dict[str, Any]:
-    """Evaluate AIME predictions against ground truth answers"""
-    correct = 0
-    total = len(predictions)
-    detailed_results = []
-
-    for i, (pred, truth) in enumerate(zip(predictions, ground_truth)):
-        pred_normalized = normalize_aime_answer(pred)
-        truth_normalized = normalize_aime_answer(truth)
-
-        is_correct = pred_normalized == truth_normalized
-        if is_correct:
-            correct += 1
-
-        detailed_results.append({
-            "problem_id": i + 1,
-            "prediction": pred,
-            "prediction_normalized": pred_normalized,
-            "ground_truth": truth,
-            "ground_truth_normalized": truth_normalized,
-            "correct": is_correct
-        })
-
-    accuracy = correct / total if total > 0 else 0
-
-    return {
-        "accuracy": accuracy,
-        "correct": correct,
-        "total": total,
-        "aime_score": f"{correct}/15",
-        "detailed_results": detailed_results
-    }
 
 
 def format_arc_question(question: str, choices: List[str], labels: List[str]) -> str:
@@ -342,13 +248,34 @@ def load_benchmark_config(config_path: str) -> Optional[BenchmarkConfig]:
         return None
 
 
-def run_benchmark(client: VLLMClient,
-                 model: str,
+def run_benchmark(model: str,
                  benchmark: BenchmarkConfig,
+                 host: str = "localhost",
+                 port: int = 8000,
                  verbose: bool = False,
                  system_prompt: Optional[str] = None,
-                 max_sample: Optional[int] = None) -> Dict[str, Any]:
+                 max_sample: Optional[int] = None,
+                 output_path: Optional[str] = None) -> Dict[str, Any]:
     """Run benchmark prompts against the model"""
+    # Load existing results if checkpoint file exists
+    existing_results = None
+    completed_indices = set()
+
+    if output_path and os.path.exists(output_path):
+        try:
+            with open(output_path, 'r') as f:
+                existing_results = json.load(f)
+
+            # Get indices of completed prompts
+            for i, response in enumerate(existing_results.get("responses", [])):
+                if response.get("response") is not None:
+                    completed_indices.add(i)
+
+            print(f"Found existing results: {len(completed_indices)} prompts already completed")
+        except Exception as e:
+            print(f"Warning: Could not load existing results from {output_path}: {e}")
+            existing_results = None
+
     # Apply max_sample limit if specified
     prompts_to_run = benchmark.prompts
     ground_truth_subset = None
@@ -358,77 +285,95 @@ def run_benchmark(client: VLLMClient,
         if hasattr(benchmark, 'ground_truth_answers'):
             ground_truth_subset = benchmark.ground_truth_answers[:max_sample]
 
-    results = {
-        "benchmark": benchmark.name,
-        "model": model,
-        "responses": [],
-        "total_available": len(benchmark.prompts),
-        "evaluated": len(prompts_to_run)
-    }
+    # Initialize results structure
+    if existing_results and existing_results.get("benchmark") == benchmark.name and existing_results.get("model") == model:
+        # Continue from existing results
+        results = existing_results
+        results["evaluated"] = len(prompts_to_run)
+
+        # Ensure responses list is the right length
+        while len(results["responses"]) < len(prompts_to_run):
+            results["responses"].append({"prompt": "", "response": None})
+    else:
+        # Start fresh
+        results = {
+            "benchmark": benchmark.name,
+            "model": model,
+            "responses": [],
+            "total_available": len(benchmark.prompts),
+            "evaluated": len(prompts_to_run)
+        }
+        # Initialize empty responses
+        for i, prompt in enumerate(prompts_to_run):
+            results["responses"].append({"prompt": prompt, "response": None})
 
     print(f"\nRunning benchmark: {benchmark.name}")
     print(f"Model: {model}")
     print(f"Total prompts available: {len(benchmark.prompts)}")
+    remaining_prompts = len(prompts_to_run) - len(completed_indices)
     print(f"Evaluating: {len(prompts_to_run)} prompts")
+    print(f"Already completed: {len(completed_indices)} prompts")
+    print(f"Remaining: {remaining_prompts} prompts")
     if max_sample and max_sample < len(benchmark.prompts):
         print(f"Limited by max_sample: {max_sample}")
     print("-" * 50)
 
-    for i, prompt in enumerate(prompts_to_run, 1):
-        print(f"Prompt {i}/{len(prompts_to_run)}")
+    for i, prompt in tqdm(enumerate(prompts_to_run), total=len(prompts_to_run)):
+        # Skip if already completed
+        if i in completed_indices:
+            if verbose:
+                print(f"Prompt {i+1}/{len(prompts_to_run)} - SKIPPED (already completed)")
+            continue
+
+        print(f"Prompt {i+1}/{len(prompts_to_run)}")
 
         if verbose:
             print(f"Input: {prompt[:100]}{'...' if len(prompt) > 100 else ''}")
-        print(f"System prompt: {system_prompt}")
-        response = client.prompt_model(
+        full_prompt = f"{system_prompt}\n\nQuestion: {prompt}\n\nAnswer:"
+        response = prompt_model(
             model=model,
             prompt=prompt,
             system_prompt=system_prompt,
             temperature=benchmark.temperature,
-            max_tokens=benchmark.max_tokens
+            max_tokens=benchmark.max_tokens,
+            host=host,
+            port=port
         )
 
         if response:
-            results["responses"].append({
+            results["responses"][i] = {
                 "prompt": prompt,
-                "response": response
-            })
+                "response": response,
+                'full_prompt': full_prompt
+            }
 
             if verbose:
                 print(f"Response: {response[:200]}{'...' if len(response) > 200 else ''}")
+
+            # Save progress after each completion
+            if output_path:
+                save_results(results, output_path)
         else:
-            print(f"Failed to get response for prompt {i}")
-            results["responses"].append({
+            print(f"Failed to get response for prompt {i+1}")
+            results["responses"][i] = {
                 "prompt": prompt,
                 "response": None
-            })
+            }
 
-    # Add evaluation if ground truth answers are available
+    # Add gold answers if available
     if hasattr(benchmark, 'ground_truth_answers'):
-        predictions = [resp["response"] for resp in results["responses"] if resp["response"]]
-
         # Use the subset if max_sample was applied
         if ground_truth_subset is not None:
-            ground_truth = ground_truth_subset[:len(predictions)]
+            gold_answers = ground_truth_subset
         else:
-            ground_truth = benchmark.ground_truth_answers[:len(predictions)]
+            gold_answers = benchmark.ground_truth_answers[:len(results["responses"])]
 
-        if hasattr(benchmark, 'dataset_type') and benchmark.dataset_type == "arc":
-            evaluation = evaluate_arc_predictions(predictions, ground_truth)
-            results["evaluation"] = evaluation
+        # Add gold answer to each response
+        for i, response in enumerate(results["responses"]):
+            if i < len(gold_answers):
+                response["gold_answer"] = gold_answers[i]
 
-            print(f"\nARC Evaluation Results:")
-            print(f"Accuracy: {evaluation['accuracy']:.3f}")
-            print(f"Correct: {evaluation['correct']}/{evaluation['total']}")
-
-        elif hasattr(benchmark, 'dataset_type') and benchmark.dataset_type == "aime":
-            evaluation = evaluate_aime_predictions(predictions, ground_truth)
-            results["evaluation"] = evaluation
-
-            print(f"\nAIME Evaluation Results:")
-            print(f"Score: {evaluation['aime_score']}")
-            print(f"Accuracy: {evaluation['accuracy']:.3f}")
-            print(f"Correct: {evaluation['correct']}/{evaluation['total']}")
+        results["gold_answers"] = gold_answers
 
     return results
 
@@ -475,9 +420,8 @@ def main():
 
     args = parser.parse_args()
 
-    # Initialize client
-    client = VLLMClient(host=args.host, port=args.port)
-    client.verify_model(args.model)
+    # Verify model availability
+    verify_model(args.model, args.host, args.port)
     # Determine system prompt to use
     system_prompt = args.system
     if not system_prompt and os.path.exists(args.system_prompt_yaml):
@@ -502,15 +446,16 @@ def main():
         if not benchmark:
             sys.exit(1)
 
-    # Run benchmark
-    results = run_benchmark(client, args.model, benchmark, args.verbose, system_prompt, args.max_sample)
-
     # Determine output path
     if args.output:
         output_path = args.output
     else:
         output_path = get_auto_output_path(args.system_prompt_type, args.model, benchmark.name)
 
+    # Run benchmark
+    results = run_benchmark(args.model, benchmark, args.host, args.port, args.verbose, system_prompt, args.max_sample, output_path)
+
+    # Save final results
     save_results(results, output_path)
 
 

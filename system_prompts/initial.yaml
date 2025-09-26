@@ -19,6 +19,7 @@ prompts:
       - No external links unless asked; no tool calls unless clearly beneficial.
 
       Output template:
+      Answer:
       **Reasoning:**
       1. …
       2. …
@@ -55,6 +56,7 @@ prompts:
       - Otherwise output only the **Final Answer**.
 
       Output template (when reasoning is triggered):
+      Answer:
       **Reasoning (concise):**
       1. …
       2. …
@@ -83,9 +85,11 @@ prompts:
       - If you must add justification, place it on a single line labeled **Justification (brief):** before **Final Answer**.
 
       Output template (default):
+      Answer:
       **Final Answer:** …
 
       Output template (if brief justification is unavoidable):
+      Answer:
       **Justification (brief):** …
       **Final Answer:** …
     tags: ["minimal", "direct", "low-latency", "token-efficiency"]
