@@ -6,6 +6,7 @@ Utility functions and configurations for baseline.py
 VALID_MODELS = {
     "meta-llama/Llama-3.2-3B": "llama3.2_3B",
     "Qwen/Qwen3-8B": "qwen3_8B",
+    "Qwen/Qwen3-8B-Base": "qwen3_8B_base",
 }
 
 

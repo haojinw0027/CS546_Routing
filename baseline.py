@@ -230,6 +230,44 @@ def load_aime_2025_dataset(split: str = "default") -> Optional[BenchmarkConfig]:
         return None
 
 
+def load_math_500_dataset(split: str = "test") -> Optional[BenchmarkConfig]:
+    """Load MATH-500 dataset from Hugging Face"""
+    if not HF_DATASETS_AVAILABLE:
+        print("Error: datasets library not available. Install with: pip install datasets")
+        return None
+
+    try:
+        dataset = load_dataset("HuggingFaceH4/MATH-500")[split]
+
+        prompts = []
+        answers = []
+
+        for item in dataset:
+            problem = item["problem"]
+            solution = item["solution"]
+
+            prompts.append(problem)
+            answers.append(solution)
+
+        benchmark = BenchmarkConfig(
+            name=f"MATH_500_{split}",
+            prompts=prompts,
+            system_prompt=None,
+            temperature=0.0,
+            max_tokens=2000
+        )
+
+        # Add ground truth answers and dataset type
+        benchmark.ground_truth_answers = answers
+        benchmark.dataset_type = "math"
+
+        return benchmark
+
+    except Exception as e:
+        print(f"Error loading MATH-500 dataset: {e}")
+        return None
+
+
 def load_benchmark_config(config_path: str) -> Optional[BenchmarkConfig]:
     """Load benchmark configuration from JSON file"""
     try:
@@ -340,12 +378,22 @@ def run_benchmark(model: str,
             port=port
         )
 
+        # Prepare response data
+        response_data = {
+            "prompt": prompt,
+            "response": response,
+            'full_prompt': full_prompt
+        }
+
+        # Add gold answer immediately if available
+        if hasattr(benchmark, 'ground_truth_answers') and i < len(benchmark.ground_truth_answers):
+            if ground_truth_subset is not None and i < len(ground_truth_subset):
+                response_data["gold_answer"] = ground_truth_subset[i]
+            elif i < len(benchmark.ground_truth_answers):
+                response_data["gold_answer"] = benchmark.ground_truth_answers[i]
+
         if response:
-            results["responses"][i] = {
-                "prompt": prompt,
-                "response": response,
-                'full_prompt': full_prompt
-            }
+            results["responses"][i] = response_data
 
             if verbose:
                 print(f"Response: {response[:200]}{'...' if len(response) > 200 else ''}")
@@ -355,25 +403,8 @@ def run_benchmark(model: str,
                 save_results(results, output_path)
         else:
             print(f"Failed to get response for prompt {i+1}")
-            results["responses"][i] = {
-                "prompt": prompt,
-                "response": None
-            }
-
-    # Add gold answers if available
-    if hasattr(benchmark, 'ground_truth_answers'):
-        # Use the subset if max_sample was applied
-        if ground_truth_subset is not None:
-            gold_answers = ground_truth_subset
-        else:
-            gold_answers = benchmark.ground_truth_answers[:len(results["responses"])]
-
-        # Add gold answer to each response
-        for i, response in enumerate(results["responses"]):
-            if i < len(gold_answers):
-                response["gold_answer"] = gold_answers[i]
-
-        results["gold_answers"] = gold_answers
+            response_data["response"] = None
+            results["responses"][i] = response_data
 
     return results
 
@@ -404,9 +435,9 @@ def main():
     parser.add_argument("--model", "-m", required=True, help="Model name to use")
     parser.add_argument("--port", "-p", type=int, default=8088, help="vLLM server port (default: 8000)")
     parser.add_argument("--host", default="localhost", help="vLLM server host (default: localhost)")
-    parser.add_argument("--benchmark", "-b", required=True,
-                       help="Benchmark dataset to use (aime_2025, arc_challenge) or path to JSON config file")
-    parser.add_argument("--split", default=None, help="Dataset split (for AIME: default/part1/part2, for ARC: train/validation/test)")
+    parser.add_argument("--benchmark", "-b", required=True, choices = ["aime_2025", "arc_challenge", "math_500"],
+                       help="Benchmark dataset to use (aime_2025, arc_challenge, math_500) or path to JSON config file")
+    parser.add_argument("--split", default=None, help="Dataset split (for AIME: default/part1/part2, for ARC: train/validation/test, for MATH-500: test/train)")
     parser.add_argument("--max-sample", type=int, help="Maximum number of samples to evaluate from the benchmark")
     parser.add_argument("--system", help="System prompt to use (overrides YAML)")
     parser.add_argument("--system-prompt-yaml", default="./system_prompts/initial.yaml",
@@ -438,6 +469,11 @@ def main():
     elif args.benchmark == "arc_challenge":
         split = args.split if args.split else "test"
         benchmark = load_arc_challenge_dataset(split)
+        if not benchmark:
+            sys.exit(1)
+    elif args.benchmark == "math_500":
+        split = args.split if args.split else "test"
+        benchmark = load_math_500_dataset(split)
         if not benchmark:
             sys.exit(1)
     else:

@@ -22,6 +22,8 @@ def extract_final_answer(response_text):
     """
     # First try to match **Final Answer:** followed by any text until newline
     pattern1 = r'\*\*Final Answer:\*\*\s*([^\n\r]*)'
+    if not response_text:
+        return None
     match1 = re.search(pattern1, response_text)
     
     if match1:
