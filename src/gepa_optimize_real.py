@@ -15,11 +15,13 @@ import argparse
 import json
 import os
 import random
+import requests
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 try:
     import gepa
+    from gepa.core.adapter import EvaluationBatch
     GEPA_AVAILABLE = True
 except ImportError:
     GEPA_AVAILABLE = False
@@ -49,35 +51,105 @@ class GEPAAdapterWrapper:
 
     def evaluate(
         self,
+        inputs: List[Dict],
         candidate: Dict[str, str],
-        minibatch: Optional[List[Dict]] = None
-    ) -> tuple:
+        capture_traces: bool = False
+    ) -> EvaluationBatch:
         """
-        Evaluate a candidate prompt on a minibatch.
+        Evaluate a candidate prompt on a batch of inputs.
+        This signature matches what GEPA expects from adapters.
 
         Args:
+            inputs: List of examples to evaluate on
             candidate: Dict with 'system_prompt' key
-            minibatch: List of examples to evaluate on (if None, use full trainset)
+            capture_traces: Whether to capture detailed traces (GEPA compatibility)
 
         Returns:
-            (score, traces): Overall score and execution traces
+            EvaluationBatch with outputs, scores, and optionally trajectories
         """
         system_prompt = candidate.get('system_prompt', '')
-        examples = minibatch if minibatch is not None else self.trainset
 
         # Evaluate using our adapter
-        evaluation = self.adapter.evaluate(system_prompt, examples, capture_traces=True)
+        evaluation = self.adapter.evaluate(system_prompt, inputs, capture_traces=True)
 
-        score = evaluation['overall_score']
-        traces = {
-            'results': evaluation['results'],
-            'trajectories': evaluation['trajectories'],
-            'math_score': evaluation['math_score'],
-            'arc_score': evaluation['arc_score'],
-            'overall_score': score
-        }
+        # Extract per-example scores from results
+        results = evaluation['results']
+        scores = [r.score for r in results]
 
-        return score, traces
+        # Use results as outputs (they contain answer, predictions, etc.)
+        outputs = results
+
+        # Include trajectories if requested
+        trajectories = evaluation['trajectories'] if capture_traces else None
+
+        return EvaluationBatch(
+            outputs=outputs,
+            scores=scores,
+            trajectories=trajectories
+        )
+
+    def make_reflective_dataset(
+        self,
+        candidate: Dict[str, str],
+        eval_batch: EvaluationBatch,
+        components_to_update: List[str]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Build a reflective dataset for GEPA to use for instruction refinement.
+
+        Args:
+            candidate: The candidate being evaluated
+            eval_batch: The evaluation results
+            components_to_update: List of component names to update
+
+        Returns:
+            Dict mapping component name to list of reflective records
+        """
+        reflective_datasets = {}
+
+        for component_name in components_to_update:
+            records = []
+
+            # Separate errors and successes
+            errors = [(i, r) for i, r in enumerate(eval_batch.outputs) if r.score == 0.0]
+            successes = [(i, r) for i, r in enumerate(eval_batch.outputs) if r.score == 1.0]
+
+            # Add error examples (up to 5)
+            for i, result in errors[:5]:
+                traj = eval_batch.trajectories[i] if eval_batch.trajectories else {}
+                record = {
+                    "Inputs": {
+                        "question": traj.get('question', ''),
+                        "task_type": result.task_type
+                    },
+                    "Generated Outputs": {
+                        "answer": traj.get('extracted_answer', 'nothing'),
+                        "has_reasoning": traj.get('has_reasoning', False)
+                    },
+                    "Feedback": f"Expected: {result.gold_answer}. Got: {traj.get('extracted_answer', 'nothing')}. "
+                               f"Task: {result.task_type}."
+                }
+                records.append(record)
+
+            # Add a few success examples for context (up to 2)
+            for i, result in successes[:2]:
+                traj = eval_batch.trajectories[i] if eval_batch.trajectories else {}
+                record = {
+                    "Inputs": {
+                        "question": traj.get('question', ''),
+                        "task_type": result.task_type
+                    },
+                    "Generated Outputs": {
+                        "answer": traj.get('extracted_answer', ''),
+                        "correct": True
+                    },
+                    "Feedback": f"Correct answer: {result.gold_answer}. Task: {result.task_type}. This approach worked well."
+                }
+                records.append(record)
+
+            reflective_datasets[component_name] = records
+
+        return reflective_datasets
 
     def extract_traces_for_reflection(
         self,
@@ -161,13 +233,61 @@ def load_seed_prompts(yaml_path: str) -> List[str]:
     return prompts
 
 
+class CustomClaudeAPIAdapter:
+    """
+    Custom adapter for using a Claude API endpoint as the reflection model.
+    This allows GEPA to use your custom Claude service at http://172.31.13.66:8080/reward
+    """
+    def __init__(self, api_endpoint: str):
+        self.api_endpoint = api_endpoint
+
+    def __call__(self, prompt: str, system: str = None, **kwargs) -> str:
+        """
+        Call the custom Claude API with the given prompt.
+
+        Args:
+            prompt: The user prompt/question
+            system: Optional system prompt
+            **kwargs: Additional parameters like max_tokens, temperature
+
+        Returns:
+            The model's response text
+        """
+        # Prepare request payload
+        payload = {
+            "prompt": prompt,
+            "max_tokens": kwargs.get("max_tokens", 4000),
+            "temperature": kwargs.get("temperature", 0),
+            "top_p": kwargs.get("top_p", 0.99)
+        }
+
+        if system:
+            payload["system"] = system
+
+        try:
+            response = requests.post(self.api_endpoint, json=payload, timeout=120)
+            response.raise_for_status()
+            result = response.json()
+
+            # Extract text from response
+            if "content" in result and isinstance(result["content"], list):
+                return result["content"][0]["text"]
+            else:
+                return str(result)
+
+        except Exception as e:
+            print(f"Error calling custom Claude API: {e}")
+            raise
+
+
 def run_gepa_optimization(
     adapter_wrapper: GEPAAdapterWrapper,
     seed_prompts: List[str],
     task_lm: str,
     reflection_lm: str,
     max_metric_calls: int = 150,
-    output_dir: str = "./results/gepa_optimization"
+    output_dir: str = "./results/gepa_optimization",
+    custom_reflection_api: Optional[CustomClaudeAPIAdapter] = None
 ) -> Dict[str, Any]:
     """
     Run GEPA optimization using the real GEPA library.
@@ -202,12 +322,16 @@ def run_gepa_optimization(
 
     # Run GEPA optimization
     # Note: GEPA will handle the evolutionary search, reflection, and mutation
+    # If custom_reflection_api is provided, use it instead of the default reflection_lm
+    reflection_model = custom_reflection_api if custom_reflection_api else reflection_lm
+
+    # When using a custom adapter, GEPA requires task_lm to be None
     gepa_result = gepa.optimize(
         seed_candidate=seed_candidate,
         trainset=adapter_wrapper.trainset,
         valset=adapter_wrapper.valset,
-        task_lm=task_lm,
-        reflection_lm=reflection_lm,
+        task_lm=None,  # Set to None when using custom adapter
+        reflection_lm=reflection_model,
         max_metric_calls=max_metric_calls,
         adapter=adapter_wrapper,  # Our custom adapter
     )
@@ -220,22 +344,30 @@ def run_gepa_optimization(
 
     # Final validation
     print("Running final validation...")
-    val_score, val_traces = adapter_wrapper.evaluate(
+    val_batch = adapter_wrapper.evaluate(
+        adapter_wrapper.valset,
         gepa_result.best_candidate,
-        adapter_wrapper.valset
+        capture_traces=True
     )
+
+    # Calculate scores by task type
+    val_score = sum(val_batch.scores) / len(val_batch.scores)
+    math_results = [r for r in val_batch.outputs if r.task_type == "math"]
+    arc_results = [r for r in val_batch.outputs if r.task_type == "arc"]
+    math_score = sum(r.score for r in math_results) / len(math_results) if math_results else 0.0
+    arc_score = sum(r.score for r in arc_results) / len(arc_results) if arc_results else 0.0
 
     print(f"\nFinal Validation Results:")
     print(f"  Overall: {val_score:.2%}")
-    print(f"  MATH: {val_traces['math_score']:.2%}")
-    print(f"  ARC: {val_traces['arc_score']:.2%}")
+    print(f"  MATH: {math_score:.2%}")
+    print(f"  ARC: {arc_score:.2%}")
 
     results = {
         "best_prompt": best_prompt,
         "train_score": gepa_result.best_score,
         "val_score": val_score,
-        "val_math_score": val_traces['math_score'],
-        "val_arc_score": val_traces['arc_score'],
+        "val_math_score": math_score,
+        "val_arc_score": arc_score,
         "optimization_history": gepa_result.history if hasattr(gepa_result, 'history') else [],
         "config": {
             "task_lm": task_lm,
@@ -257,9 +389,11 @@ def main():
     parser.add_argument("--host", default="localhost",
                        help="vLLM server host")
     parser.add_argument("--reflection-model", default="openai/gpt-4",
-                       help="Reflection model (e.g., openai/gpt-4, anthropic/claude-3-5-sonnet)")
+                       help="Reflection model (e.g., openai/gpt-4, anthropic/claude-3-5-sonnet, custom-api)")
     parser.add_argument("--reflection-api-key", default=None,
                        help="API key for reflection model (or set via env var)")
+    parser.add_argument("--reflection-api-endpoint", default=None,
+                       help="Custom API endpoint for reflection model (e.g., http://172.31.13.66:8080/reward)")
     parser.add_argument("--dataset", default="./data/mixed_math_arc.json",
                        help="Path to mixed dataset JSON")
     parser.add_argument("--seed-prompts", default="./system_prompts/initial.yaml",
@@ -329,15 +463,29 @@ def main():
     # For now, we'll assume the model name works
     task_lm = args.model
 
+    # Set up custom reflection API if endpoint is provided
+    custom_reflection_api = None
+    if args.reflection_api_endpoint:
+        print(f"\nUsing custom Claude API endpoint: {args.reflection_api_endpoint}")
+        custom_reflection_api = CustomClaudeAPIAdapter(args.reflection_api_endpoint)
+        # Test the connection
+        try:
+            test_response = custom_reflection_api("Hello, please respond briefly.", max_tokens=50)
+            print(f"  Connection test successful! Response: {test_response[:100]}...")
+        except Exception as e:
+            print(f"  WARNING: Connection test failed: {e}")
+            print("  Continuing anyway...")
+
     # Run GEPA optimization
     try:
         results = run_gepa_optimization(
             adapter_wrapper=adapter_wrapper,
             seed_prompts=seed_prompts,
             task_lm=task_lm,
-            reflection_lm=args.reflection_model,
+            reflection_lm=args.reflection_model if not custom_reflection_api else "custom-claude-api",
             max_metric_calls=args.max_metric_calls,
-            output_dir=args.output_dir
+            output_dir=args.output_dir,
+            custom_reflection_api=custom_reflection_api
         )
 
         # Save results
