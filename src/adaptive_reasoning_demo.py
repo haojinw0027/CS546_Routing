@@ -286,16 +286,16 @@ def main():
         metric=metric_with_adaptive_reasoning_feedback,  # Use detailed feedback
         num_threads=1,
         track_stats=True,
-        reflection_minibatch_size=2,  # Let reflection model analyze 2 questions per batch
+        reflection_minibatch_size=4,  # Let reflection model analyze 2 questions per batch
         reflection_lm=reflection_lm,
-        max_metric_calls=50
+        auto="light"
     )
 
     print("\n  Starting optimization...")
     optimized_program = optimizer.compile(
         program,
-        trainset=train_set[:10],  # Use small sample for optimization
-        valset=val_set[:5],
+        trainset=train_set,  # Use small sample for optimization
+        valset=val_set,
     )
 
     print("\n  Optimization complete!")
@@ -309,8 +309,26 @@ def main():
     print("\n" + "=" * 80)
     print("OPTIMIZED PROMPT:")
     print("=" * 80)
-    print(optimized_program.predict.signature.instructions)
+    optimized_prompt = optimized_program.predict.signature.instructions
+    print(optimized_prompt)
     print("=" * 80)
+
+    # Save optimized prompt to file
+    output_dir = "/home/haojinw2/efs/haojin/vlaa/system_prompt/results"
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+
+    prompt_file = os.path.join(output_dir, "optimized_prompt.txt")
+    with open(prompt_file, 'w') as f:
+        f.write("OPTIMIZED SYSTEM PROMPT\n")
+        f.write("=" * 80 + "\n\n")
+        f.write(optimized_prompt)
+        f.write("\n\n" + "=" * 80 + "\n")
+        f.write(f"\nUnoptimized score: {unoptimized_score}\n")
+        f.write(f"Optimized score: {optimized_score}\n")
+        f.write(f"Improvement: {float(optimized_score) - float(unoptimized_score):.2%}\n")
+
+    print(f"\n✓ Optimized prompt saved to: {prompt_file}")
 
     # 8. Comparative analysis
     print("\n" + "=" * 80)
