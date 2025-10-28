@@ -10,6 +10,7 @@ import json
 import requests
 from typing import Any, Dict, List, TypedDict
 from pathlib import Path
+from transformers import AutoTokenizer
 
 # Add gepa to path - use local gepa/ directory instead of pip installed version
 GEPA_PATH = Path(__file__).parent.parent / "gepa" / "src"
@@ -122,6 +123,7 @@ class MathAdapter(GEPAAdapter[MathDataInst, MathTrajectory, MathRolloutOutput]):
         self.vllm_port = vllm_port
         self.max_tokens = max_tokens
         self.vllm_url = f"http://{vllm_host}:{vllm_port}/v1/completions"
+        self.last_reflective_dataset = []  # Store latest reflective dataset for logging
 
     def call_vllm(self, prompt: str, system_prompt: str = "") -> str:
         """Call vLLM server"""
@@ -159,7 +161,11 @@ class MathAdapter(GEPAAdapter[MathDataInst, MathTrajectory, MathRolloutOutput]):
         # Get system prompt from candidate
         system_prompt = next(iter(candidate.values()))
 
-        for data in batch:
+        print(f"\n{'='*80}")
+        print(f"EVALUATING BATCH OF {len(batch)} PROBLEMS")
+        print(f"{'='*80}")
+
+        for idx, data in enumerate(batch, 1):
             # Call vLLM to get response
             response = self.call_vllm(data["problem"], system_prompt)
 
@@ -167,6 +173,14 @@ class MathAdapter(GEPAAdapter[MathDataInst, MathTrajectory, MathRolloutOutput]):
             # Normalize both for comparison
             expected_answer = data["answer"].strip()
             score = 1.0 if expected_answer in response else 0.0
+
+            # Print query and answer to terminal
+            print(f"\n[Query {idx}/{len(batch)}]")
+            print(f"Problem: {data['problem'][:100]}...")  # Print first 100 chars
+            print(f"Expected Answer: {expected_answer}")
+            print(f"Model Response: {response[:200]}...")  # Print first 200 chars
+            print(f"Score: {'✓ CORRECT' if score > 0 else '✗ INCORRECT'}")
+            print("-" * 80)
 
             output = {"full_response": response}
             outputs.append(output)
@@ -179,7 +193,15 @@ class MathAdapter(GEPAAdapter[MathDataInst, MathTrajectory, MathRolloutOutput]):
                     "system_prompt": system_prompt,
                 })
 
+        print(f"\nBatch Score: {sum(scores)}/{len(scores)} correct")
+        print(f"{'='*80}\n")
+
         return EvaluationBatch(outputs=outputs, scores=scores, trajectories=trajectories)
+
+    
+    def _analyze_reasoning_quality(self, generated_output: str, reasoning_length: int, reasoning_lines: int) -> str:
+        """Analyze reasoning quality"""
+        return f"The reasoning is {reasoning_length} tokens long and has {reasoning_lines} lines."
 
     def make_reflective_dataset(
         self,
@@ -207,17 +229,32 @@ class MathAdapter(GEPAAdapter[MathDataInst, MathTrajectory, MathRolloutOutput]):
         for traj, score, _ in trace_instances:
             data = traj["data"]
             generated_output = traj["full_response"]
+            
+            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-8B")
+            tokens = tokenizer.encode(generated_output)
+            # Analyze reasoning quality
+            reasoning_length = len(tokens)
+            reasoning_lines = generated_output.count('\n') + 1
+
+            # Build reasoning quality feedback
+            reasoning_feedback = self._analyze_reasoning_quality(
+                generated_output,
+                reasoning_length,
+                reasoning_lines
+            )
 
             if score > 0.0:
                 feedback = (
                     f"✓ CORRECT: The response correctly includes the answer '{data['answer']}'. "
-                    f"The solution approach is valid."
+                    f"The solution approach is valid.\n\n"
+                    f"{reasoning_feedback}"
                 )
             else:
                 feedback = (
                     f"✗ INCORRECT: The response does not contain the correct answer '{data['answer']}'. "
                     f"\n\nGround truth solution:\n{data['solution']}\n\n"
-                    f"The model should learn from this solution approach to improve its problem-solving strategy."
+                    f"The model should learn from this solution approach to improve its problem-solving strategy.\n\n"
+                    f"{reasoning_feedback}"
                 )
 
             item = {
@@ -226,10 +263,15 @@ class MathAdapter(GEPAAdapter[MathDataInst, MathTrajectory, MathRolloutOutput]):
                 "Expected Answer": data["answer"],
                 "Feedback": feedback,
                 "Score": score,
+                "Reasoning Length": reasoning_length,
+                "Reasoning Lines": reasoning_lines,
             }
             items.append(item)
 
         ret_d[comp] = items
+
+        # Store for trajectory logging
+        self.last_reflective_dataset = items
 
         if len(items) == 0:
             raise Exception("No valid predictions found for reflection.")
@@ -426,6 +468,10 @@ Your answer should be clear and complete."""
                 iteration_data['subsample_scores_before'] = result.subsample_scores_before
                 iteration_data['subsample_scores_after'] = result.subsample_scores_after
                 iteration_data['improved'] = sum(result.subsample_scores_after) > sum(result.subsample_scores_before)
+
+                # Add reflective dataset (query-answer pairs used for reflection)
+                if hasattr(adapter, 'last_reflective_dataset') and adapter.last_reflective_dataset:
+                    iteration_data['reflective_queries'] = adapter.last_reflective_dataset
 
         except Exception as e:
             # Log the error but re-raise to maintain original behavior
