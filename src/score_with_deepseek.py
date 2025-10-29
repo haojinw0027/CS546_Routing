@@ -131,7 +131,7 @@ def process_json_file(json_path):
     # Update original cases with evaluations
     case_dict = {c['question']: c for c in processed_results}
     for case in cases:
-        if case['question'] in case_dict:
+        if case['question'] in case_dict and 'evaluation' in case_dict[case['question']]:
             case['evaluation'] = case_dict[case['question']]['evaluation']
     
     # Compute totals from all processed
