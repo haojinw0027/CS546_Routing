@@ -133,7 +133,11 @@ class MathAdapter(GEPAAdapter[MathDataInst, MathTrajectory, MathRolloutOutput]):
         payload = {
             "model": self.vllm_model,
             "prompt": full_prompt,
-            "temperature": 0.0,
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "repetition_penalty": 1.2,
+            "top_k": 20,
+            "min_p": 0.0,
             "max_tokens": self.max_tokens,
             "stop": ["<|endoftext|>", "\nQuestion:", "Question:"]
         }
@@ -378,7 +382,7 @@ def main():
 
     # Configuration
     train_file = "data/MATH_adaptive_demo/train.json"
-    output_file = "data/MATH_adaptive_demo/traj.json"
+    output_file = "data/MATH_adaptive_demo/traj_Haengbok.json"
 
     # Initialize trajectory logger with output file for immediate writes
     traj_logger = TrajectoryLogger(output_file=output_file)
@@ -390,24 +394,17 @@ def main():
 
     # Split into train/val (use small subset for testing)
     # For full training, adjust these numbers
-    trainset = dataset[:200]  # Use first 20 for training
-    valset = dataset[200:300]  # Use next 10 for validation
+    trainset = dataset[:150]  # Use first 20 for training
+    valset = dataset[150:]  # Use next 10 for validation
 
     print(f"Training set: {len(trainset)} problems")
     print(f"Validation set: {len(valset)} problems")
 
     # Initial seed prompt
-    seed_prompt = {
-        "system_prompt": """You are a helpful math problem solver.
-
-When given a math problem:
-1. Read the problem carefully and identify what is being asked
-2. Break down the problem into steps
-3. Show your work clearly
-4. Provide the final answer in the exact format requested
-
-Your answer should be clear and complete."""
-    }
+    import yaml
+    seed_prompt = yaml.load(open("system_prompts/Haengbok_Prompt.yaml", "r"), Loader=yaml.FullLoader)
+    seed_prompt = seed_prompt["Initial_prompt"]["content"]
+    seed_prompt = {"system_prompt": seed_prompt}
 
     print("\n" + "="*80)
     print("Initial Prompt:")
@@ -417,7 +414,7 @@ Your answer should be clear and complete."""
 
     # Create adapter
     adapter = MathAdapter(
-        vllm_model="Qwen/Qwen3-8B",
+        vllm_model="Qwen/Qwen3-14B",
         vllm_host="localhost",
         vllm_port=8088,
         max_tokens=2048,
@@ -506,7 +503,7 @@ Your answer should be clear and complete."""
             valset=valset,
             adapter=adapter,
             reflection_lm=reflection_lm,
-            max_metric_calls=1000,  # Small number for testing; increase for real training
+            max_metric_calls=5000,  # Small number for testing; increase for real training
             reflection_minibatch_size=3,
             logger=custom_logger,
             candidate_selection_strategy="pareto",

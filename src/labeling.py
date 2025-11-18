@@ -116,7 +116,7 @@ def main():
     print(f"Total examples in MATH dataset: {total_examples}")
 
     # Randomly sample 200 examples
-    sample_size = 200
+    sample_size = 500
     if total_examples < sample_size:
         print(f"Warning: Dataset has only {total_examples} examples, using all of them")
         sample_size = total_examples
