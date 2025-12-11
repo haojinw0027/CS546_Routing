@@ -1,3 +1,4 @@
+"""This is a demo implementation for MentorCollab. Will finish after ARR submission and preprint on arxiv."""
 import json
 import math
 import torch

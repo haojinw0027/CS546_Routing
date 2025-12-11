@@ -23,6 +23,19 @@ Read the inputs carefully and identify the input format and infer detailed task 
 
 Read all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.
 
+You may ONLY refine content inside the following tag types:
+      <role>, <style>, <Reasoning_Criteria>, <Verbalize_Decoding_Config>,
+      <temperature>, <top_p>, <ICL_EASY_EXAMPLE>, <ICL_HARD_EXAMPLE>
+
+All other content must remain unchanged.
+
+Refinement Goals:
+- Improve clarity and consistency of reasoning instructions.
+- Strengthen routing behavior between easy vs. hard problems.
+- Optimize ICL exemplars for better transferability across models.
+
+Reassemble the full prompt after refinement.
+
 IMPORTANT - Reasoning Routing Guidelines:
 Analyze the reasoning patterns in the responses and feedback. Pay special attention to:
 - Some problems may show overly long reasoning with unnecessary overthinking - identify these and guide the assistant to be more concise for simple cases
