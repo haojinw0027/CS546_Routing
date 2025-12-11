@@ -1,4 +1,4 @@
-# CS546 System Prompt
+# CS546 Efficient Reasoning Through Routing
 
 This repository contains two approaches for improving reasoning in language models.
 
